@@ -1,0 +1,75 @@
+name: MrBeast Subscriber Tracker
+
+on:
+  schedule:
+    - cron: '49 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  track:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests matplotlib pandas -q
+      - name: Scrape & log
+        run: |
+          python3 - <<'EOF'
+          import requests, re, os, csv
+          from datetime import datetime, timezone
+          headers = {'User-Agent': 'Mozilla/5.0', 'Accept-Language': 'en-US'}
+          r = requests.get('https://www.youtube.com/@MrBeast', headers=headers, timeout=20)
+          count, formatted = None, None
+          for pat in [r'"subscriberCountText":\{"simpleText":"([^"]+)"']:
+              m = re.search(pat, r.text)
+              if m:
+                  raw = m.group(1).strip()
+                  num = raw.lower().replace(' subscribers','').replace(',','').strip()
+                  if 'm' in num: count = int(float(num.replace('m',''))*1_000_000)
+                  formatted = raw.replace(' subscribers','').strip()
+                  break
+          ts = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+          os.makedirs('data', exist_ok=True)
+          exists = os.path.exists('data/subscribers_log.csv')
+          with open('data/subscribers_log.csv','a',newline='') as f:
+              w = csv.writer(f)
+              if not exists: w.writerow(['timestamp','subscriber_count','formatted_count'])
+              w.writerow([ts, count, formatted])
+          with open(os.environ['GITHUB_ENV'],'a') as f:
+              f.write(f"SUB_FORMATTED={formatted}\n")
+          EOF
+      - name: Generate PDF
+        run: |
+          python3 - <<'EOF'
+          import matplotlib; matplotlib.use('Agg')
+          import matplotlib.pyplot as plt, matplotlib.dates as mdates, pandas as pd, os
+          from datetime import datetime, timezone
+          os.makedirs('reports', exist_ok=True)
+          df = pd.read_csv('data/subscribers_log.csv')
+          df['timestamp'] = pd.to_datetime(df['timestamp'])
+          df['subscriber_count'] = pd.to_numeric(df['subscriber_count'], errors='coerce')
+          df = df.dropna()
+          fig, ax = plt.subplots(figsize=(12,6))
+          ax.plot(df['timestamp'], df['subscriber_count']/1e6, color='#FF0000', linewidth=2, marker='o', markersize=5, markerfacecolor='white', markeredgewidth=2)
+          ax.fill_between(df['timestamp'], df['subscriber_count']/1e6, alpha=0.1, color='#FF0000')
+          ax.set_title('MrBeast YouTube Subscriber Trend', fontsize=18, fontweight='bold')
+          ax.set_xlabel('Date / Time (UTC)'); ax.set_ylabel('Subscribers (Millions)')
+          ax.grid(True, linestyle='--', alpha=0.5)
+          ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
+          plt.xticks(rotation=45, ha='right'); plt.tight_layout()
+          plt.savefig(f"reports/{datetime.now(timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')}.pdf", format='pdf', bbox_inches='tight', dpi=150)
+          EOF
+      - name: Commit & push
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "GitHub Actions"
+          git add -A
+          git diff --cached --quiet || git commit -m "data: ${{ env.SUB_FORMATTED }} subscribers at $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push origin claude
