@@ -44,7 +44,8 @@ jobs:
               w.writerow([ts, count, formatted])
           with open(os.environ['GITHUB_ENV'],'a') as f:
               f.write(f"SUB_FORMATTED={formatted}\n")
-          EOF      - name: Generate trend PDF
+          EOF
+      - name: Generate trend PDF
         run: |
           python3 - <<'EOF'
           import matplotlib
