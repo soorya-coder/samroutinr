@@ -44,27 +44,54 @@ jobs:
               w.writerow([ts, count, formatted])
           with open(os.environ['GITHUB_ENV'],'a') as f:
               f.write(f"SUB_FORMATTED={formatted}\n")
-          EOF
-      - name: Generate PDF
+          EOF      - name: Generate trend PDF
         run: |
           python3 - <<'EOF'
-          import matplotlib; matplotlib.use('Agg')
-          import matplotlib.pyplot as plt, matplotlib.dates as mdates, pandas as pd, os
+          import matplotlib
+          matplotlib.use('Agg')
+          import matplotlib.pyplot as plt
+          import matplotlib.dates as mdates
+          import pandas as pd
+          import os
           from datetime import datetime, timezone
+
           os.makedirs('reports', exist_ok=True)
           df = pd.read_csv('data/subscribers_log.csv')
           df['timestamp'] = pd.to_datetime(df['timestamp'])
           df['subscriber_count'] = pd.to_numeric(df['subscriber_count'], errors='coerce')
-          df = df.dropna()
-          fig, ax = plt.subplots(figsize=(12,6))
-          ax.plot(df['timestamp'], df['subscriber_count']/1e6, color='#FF0000', linewidth=2, marker='o', markersize=5, markerfacecolor='white', markeredgewidth=2)
-          ax.fill_between(df['timestamp'], df['subscriber_count']/1e6, alpha=0.1, color='#FF0000')
-          ax.set_title('MrBeast YouTube Subscriber Trend', fontsize=18, fontweight='bold')
-          ax.set_xlabel('Date / Time (UTC)'); ax.set_ylabel('Subscribers (Millions)')
+          df = df.dropna(subset=['subscriber_count'])
+          df = df[df['subscriber_count'] > 0].reset_index(drop=True)
+          print(f"Valid data points: {len(df)}")
+
+          fig, ax = plt.subplots(figsize=(12, 6))
+          if len(df) == 0:
+              ax.text(0.5, 0.5, 'No valid data yet', ha='center', va='center',
+                      transform=ax.transAxes, fontsize=14, color='gray')
+          else:
+              ax.plot(df['timestamp'], df['subscriber_count']/1_000_000,
+                      color='#FF0000', linewidth=2, marker='o',
+                      markersize=6, markerfacecolor='white', markeredgewidth=2)
+              if len(df) > 1:
+                  ax.fill_between(df['timestamp'], df['subscriber_count']/1_000_000,
+                                  alpha=0.1, color='#FF0000')
+              latest = df.iloc[-1]
+              ax.annotate(f"{latest['subscriber_count']/1_000_000:.2f}M",
+                          xy=(latest['timestamp'], latest['subscriber_count']/1_000_000),
+                          xytext=(10,10), textcoords='offset points',
+                          fontsize=10, color='#FF0000', fontweight='bold')
+              ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
+              plt.xticks(rotation=45, ha='right')
+
+          ax.set_title('MrBeast YouTube Subscriber Trend', fontsize=18, fontweight='bold', pad=20)
+          ax.set_xlabel('Date / Time (UTC)', fontsize=12)
+          ax.set_ylabel('Subscribers (Millions)', fontsize=12)
           ax.grid(True, linestyle='--', alpha=0.5)
-          ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
-          plt.xticks(rotation=45, ha='right'); plt.tight_layout()
-          plt.savefig(f"reports/{datetime.now(timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')}.pdf", format='pdf', bbox_inches='tight', dpi=150)
+          plt.figtext(0.99, 0.01, f"Last updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+                      ha='right', fontsize=8, color='gray')
+          plt.tight_layout()
+          pdf_path = f"reports/{datetime.now(timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')}.pdf"
+          plt.savefig(pdf_path, format='pdf', bbox_inches='tight', dpi=150)
+          print(f"PDF saved: {pdf_path}")
           EOF
       - name: Commit & push
         run: |
