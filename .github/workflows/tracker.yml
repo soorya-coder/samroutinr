@@ -1,0 +1,163 @@
+name: MrBeast Subscriber Tracker
+
+on:
+  schedule:
+    - cron: '49 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  track:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout claude branch
+        uses: actions/checkout@v4
+        with:
+          ref: claude
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests matplotlib pandas -q
+
+      - name: Write scrape script
+        run: |
+          cat > /tmp/scrape.py << 'SCRAPEEOF'
+          import requests, re, json, os, csv
+          from datetime import datetime, timezone
+          headers = {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+              'Accept-Language': 'en-US,en;q=0.9',
+          }
+          count, formatted = None, None
+          try:
+              r = requests.get('https://www.youtube.com/@MrBeast', headers=headers, timeout=20)
+              print(f"HTTP {r.status_code}, length={len(r.text)}")
+              m = re.search(r'var ytInitialData = ({.*?});</script>', r.text, re.DOTALL)
+              if m:
+                  print("Found ytInitialData")
+                  try:
+                      data = json.loads(m.group(1))
+                      def find_key(obj, key):
+                          if isinstance(obj, dict):
+                              if key in obj: return obj[key]
+                              for v in obj.values():
+                                  result = find_key(v, key)
+                                  if result: return result
+                          elif isinstance(obj, list):
+                              for item in obj:
+                                  result = find_key(item, key)
+                                  if result: return result
+                          return None
+                      sub_obj = find_key(data, 'subscriberCountText')
+                      print(f"subscriberCountText: {sub_obj}")
+                      if sub_obj:
+                          raw = (sub_obj.get('simpleText') or sub_obj.get('accessibility', {}).get('accessibilityData', {}).get('label', '')).strip()
+                          print(f"Raw: {raw}")
+                          num = raw.lower().replace(' subscribers','').replace(',','').strip()
+                          if 'm' in num: count = int(float(num.replace('m','')) * 1_000_000)
+                          elif 'k' in num: count = int(float(num.replace('k','')) * 1_000)
+                          elif 'b' in num: count = int(float(num.replace('b','')) * 1_000_000_000)
+                          else:
+                              digits = re.sub(r'[^0-9]', '', num)
+                              count = int(digits) if digits else None
+                          formatted = raw.replace(' subscribers','').strip()
+                  except Exception as e:
+                      print(f"JSON parse error: {e}")
+              if not count:
+                  for pat in [r'"subscriberCountText":\{"simpleText":"([^"]+)"', r'"subscriberCountText":\{"accessibility":\{"accessibilityData":\{"label":"([^"]+)"']:
+                      match = re.search(pat, r.text)
+                      if match:
+                          raw = match.group(1).strip()
+                          print(f"Regex match: {raw}")
+                          num = raw.lower().replace(' subscribers','').replace(',','').strip()
+                          try:
+                              if 'm' in num: count = int(float(num.replace('m','')) * 1_000_000)
+                              elif 'k' in num: count = int(float(num.replace('k','')) * 1_000)
+                              elif 'b' in num: count = int(float(num.replace('b','')) * 1_000_000_000)
+                              else: count = int(float(num))
+                              formatted = raw.replace(' subscribers','').strip()
+                              break
+                          except: continue
+          except Exception as e:
+              print(f"Request error: {e}")
+          if count:
+              print(f"SUCCESS: {count} ({formatted})")
+          else:
+              print("WARN: Could not scrape subscriber count")
+              count = 0
+              formatted = 'unknown'
+          ts = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+          os.makedirs('data', exist_ok=True)
+          csv_file = 'data/subscribers_log.csv'
+          write_header = not os.path.exists(csv_file)
+          with open(csv_file, 'a', newline='') as f:
+              w = csv.writer(f)
+              if write_header:
+                  w.writerow(['timestamp', 'subscriber_count', 'formatted_count'])
+              w.writerow([ts, count, formatted])
+          print(f"Logged: {ts} | {count} | {formatted}")
+          with open(csv_file) as f:
+              print("CSV:\n" + f.read())
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write(f"SUB_COUNT={count}\nSUB_FORMATTED={formatted}\n")
+          SCRAPEEOF
+
+      - name: Scrape subscriber count
+        run: python3 /tmp/scrape.py
+
+      - name: Write PDF script
+        run: |
+          cat > /tmp/gen_pdf.py << 'PDFEOF'
+          import matplotlib
+          matplotlib.use('Agg')
+          import matplotlib.pyplot as plt
+          import matplotlib.dates as mdates
+          import pandas as pd
+          import os
+          from datetime import datetime, timezone
+          os.makedirs('reports', exist_ok=True)
+          df = pd.read_csv('data/subscribers_log.csv')
+          df['timestamp'] = pd.to_datetime(df['timestamp'])
+          df['subscriber_count'] = pd.to_numeric(df['subscriber_count'], errors='coerce')
+          df = df.dropna(subset=['subscriber_count'])
+          df = df[df['subscriber_count'] > 0].reset_index(drop=True)
+          print(f"Valid data points: {len(df)}")
+          fig, ax = plt.subplots(figsize=(12, 6))
+          if len(df) == 0:
+              ax.text(0.5, 0.5, 'No valid data yet\nWaiting for successful scrape...', ha='center', va='center', transform=ax.transAxes, fontsize=14, color='gray')
+          else:
+              ax.plot(df['timestamp'], df['subscriber_count']/1_000_000, color='#FF0000', linewidth=2, marker='o', markersize=6, markerfacecolor='white', markeredgewidth=2)
+              if len(df) > 1:
+                  ax.fill_between(df['timestamp'], df['subscriber_count']/1_000_000, alpha=0.1, color='#FF0000')
+              latest = df.iloc[-1]
+              ax.annotate(f"{latest['subscriber_count']/1_000_000:.2f}M", xy=(latest['timestamp'], latest['subscriber_count']/1_000_000), xytext=(10,10), textcoords='offset points', fontsize=10, color='#FF0000', fontweight='bold')
+              ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
+              plt.xticks(rotation=45, ha='right')
+          ax.set_title('MrBeast YouTube Subscriber Trend', fontsize=18, fontweight='bold', pad=20)
+          ax.set_xlabel('Date / Time (UTC)', fontsize=12)
+          ax.set_ylabel('Subscribers (Millions)', fontsize=12)
+          ax.grid(True, linestyle='--', alpha=0.5)
+          plt.figtext(0.99, 0.01, f"Last updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}", ha='right', fontsize=8, color='gray')
+          plt.tight_layout()
+          pdf_path = f"reports/{datetime.now(timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')}.pdf"
+          plt.savefig(pdf_path, format='pdf', bbox_inches='tight', dpi=150)
+          print(f"PDF saved: {pdf_path}")
+          PDFEOF
+
+      - name: Generate trend PDF
+        run: python3 /tmp/gen_pdf.py
+
+      - name: Commit and push to claude branch
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "GitHub Actions"
+          git add -A
+          git diff --cached --quiet || git commit -m "data: ${{ env.SUB_FORMATTED }} subscribers at $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push origin claude
